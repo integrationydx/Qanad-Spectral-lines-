@@ -4,7 +4,7 @@
 ![NumPy](https://img.shields.io/badge/NumPy-1.24%2B-013243.svg?logo=numpy)
 ![SciPy](https://img.shields.io/badge/SciPy-1.10%2B-8CAAE6.svg?logo=scipy)
 ![XGBoost](https://img.shields.io/badge/XGBoost-2.0%2B-orange.svg)
-![Status](https://img.shields.io/badge/Status-Phase%203%20Complete-brightgreen.svg)
+![Status](https://img.shields.io/badge/Status-Phase%204%20Complete-brightgreen.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 
 ## Overview
@@ -118,11 +118,13 @@ Running each phase does not alter the previous phase artifacts.
 Quanad/
 |-- outputs/
 |   |-- spectral_error_results.png   # Phase 1 - 9-panel results figure
-|   `-- phase2_results.png           # Phase 2 - 12-panel comparison figure
-|-- spectral_error_pipeline.py        # Phase 1 - Ridge regression baseline
-|-- phase_2.py                        # Phase 2 - XGBoost + CNN heads
-|-- phase_3.py                        # Phase 3 - High-resolution PINN dynamics
-|-- outputs/phase3_results.png        # Phase 3 - 14-panel results figure
+|   |-- phase2_results.png           # Phase 2 - 12-panel comparison figure
+|   |-- phase3_results.png           # Phase 3 - 14-panel results figure
+|   `-- phase4_results.png           # Phase 4 - 14-panel results figure
+|-- spectral_error_pipeline.py       # Phase 1 - Ridge regression baseline
+|-- phase_2.py                       # Phase 2 - XGBoost + CNN heads
+|-- phase_3.py                       # Phase 3 - High-resolution PINN dynamics
+|-- phase_4.py                       # Phase 4 - Allen-Cahn benchmark
 |-- Spectral_Error_Indicators_Research_Proposal.pdf
 |-- review1.txt
 `-- README.md
