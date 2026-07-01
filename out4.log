@@ -1,0 +1,16 @@
+======================================================================
+PHASE 4: Allen-Cahn Benchmark (Real PINN Dynamics)
+======================================================================
+Computing exact numerical solution for Allen-Cahn...
+Training PyTorch PINN (collecting real snapshots)...
+Collected 50 real PINN snapshots.
+
+======================================================================
+PHASE 4 METRICS (Allen-Cahn True PINN)
+======================================================================
+PDE Residual Correlation : 0.7290 | Refinement: 23.6%
+DMD+CNN Correlation      : 0.9929 | Refinement: 23.6%
+======================================================================
+SUCCESS: Spectral DMD features predict local error BETTER than the raw physics residual!
+
+✓ Phase 4 results figure saved → outputs/phase4_results.png
