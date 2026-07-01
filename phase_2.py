@@ -33,6 +33,7 @@ from torch.utils.data import TensorDataset, DataLoader
 warnings.filterwarnings('ignore')
 
 np.random.seed(42)
+torch.manual_seed(42)
 
 print("=" * 60)
 print("PHASE 2: Nonlinear Regression Heads")

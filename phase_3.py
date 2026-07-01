@@ -42,6 +42,7 @@ from torch.utils.data import TensorDataset, DataLoader
 warnings.filterwarnings('ignore')
 
 np.random.seed(42)
+torch.manual_seed(42)
 
 print("=" * 70)
 print("PHASE 3: High-Resolution Simulation with Realistic PINN Dynamics (N=500)")
@@ -335,7 +336,7 @@ style_ax(ax, 'PINN Training Loss Curve', LIME)
 
 # Panel 0,1 — True Error Heatmap
 ax = fig.add_subplot(gs[0, 1])
-im = ax.imshow(U_exact, aspect='auto', cmap='viridis', origin='lower')
+im = ax.imshow(U_exact, aspect='auto', cmap='viridis', origin='lower', vmin=0, vmax=2)
 ax.set_xlabel('Time', color=TXT, fontsize=7)
 ax.set_ylabel('Space', color=TXT, fontsize=7)
 cbar = plt.colorbar(im, ax=ax)
@@ -344,7 +345,7 @@ style_ax(ax, 'Exact Burgers Solution (Reference)', 'cyan')
 
 # Panel 0,2 — PINN Solution Heatmap
 ax = fig.add_subplot(gs[0, 2])
-im = ax.imshow(final_pinn, aspect='auto', cmap='viridis', origin='lower')
+im = ax.imshow(final_pinn, aspect='auto', cmap='viridis', origin='lower', vmin=0, vmax=2)
 ax.set_xlabel('Time', color=TXT, fontsize=7)
 ax.set_ylabel('Space', color=TXT, fontsize=7)
 cbar = plt.colorbar(im, ax=ax)
@@ -487,5 +488,5 @@ print("\n📊 Key Insights:")
 print(f"  ✓ N=500 (5× resolution) enabled better feature richness for regression")
 print(f"  ✓ High-Resolution Synthetic PINN dynamics differ from synthetic → CNN correlation now: {corr_c_real:.4f}")
 print(f"  ✓ High-resolution grid confirmed bottleneck hypothesis from Phase 2")
-print(f"  ✓ Solver-agnostic framework validated on real neural network training")
-print(f"  ✓ Phase 3 demonstrates feasibility for production PINN solvers")
+print(f"  ✓ Solver-agnostic framework validated on synthetic neural network training")
+print(f"  ✓ Phase 3 demonstrates that simulated noise is insufficient to capture real gradient dynamics, justifying physical tests")
