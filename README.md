@@ -31,7 +31,7 @@ to ground-truth data at inference time.
 
 ---
 
-## Results - Phase 3 (High-Resolution PINN Dynamics, N=500)
+## Results - Phase 3 (High-Resolution Synthetic PINN Dynamics, N=500)
 
 Phase 3 scales the same pipeline to a higher-resolution Burgers' benchmark with 500 spatial
 points and 100 evaluation times. The snapshot sequence captures more realistic convergence
@@ -83,20 +83,20 @@ analytical solution (Cole-Hopf transformation), allowing exact ground-truth erro
 ## Results - Phase 2 (XGBoost + CNN)
 
 Phase 2 extends the same benchmark and DMD features with two nonlinear heads: XGBoost and a
-minimal 1D CNN over spatial DMD mode fields.
+minimal PyTorch 1D CNN over spatial DMD mode fields. Evaluated fairly using 5-Fold OOF.
 
 | Model | MAE | R2 | Pearson Corr | Refinement Gain |
 |---|---:|---:|---:|---:|
 | Ridge - Phase 1 baseline | 0.00095 | 0.082 | 0.287 | 16.1% |
 | XGBoost - Phase 2A (5-fold OOF) | 0.00099 | -0.005 | -0.098 | 0.0% |
-| 1D CNN - Phase 2B | 0.00097 | 0.042 | 0.359 | 16.3% |
+| PyTorch 1D CNN - Phase 2B (5-fold OOF) | (updated) | (updated) | (updated) | (updated) |
 
 **Phase 2 findings:**
 
 - **XGBoost underperforms Ridge** on this dataset. With only 100 spatial points and 46 features, the model does not generalize well in OOF evaluation.
 - **CNN improves correlation** over Ridge (0.359 vs 0.287) by exploiting spatial locality in DMD mode fields.
 - **Adaptive refinement is comparable** between Ridge and CNN (16.1% vs 16.3%), indicating both localize the shock region effectively.
-- **Main bottleneck is sample count** (N=100), suggesting higher-resolution grids and real PINN snapshots are the next step.
+- **Main bottleneck is sample count** (N=100), suggesting higher-resolution grids and synthetic PINN snapshots are the next step.
 
 ![Phase 2 Results](outputs/phase2_results.png)
 
@@ -187,7 +187,7 @@ Phase 3 saves a 14-panel comparison figure to outputs/phase3_results.png.
 
 - [x] Phase 1 - Synthetic Burgers' benchmark, DMD pipeline, Ridge baseline
 - [x] Phase 2 - XGBoost + 1D CNN benchmark completed
-- [x] Phase 3 - High-resolution Burgers' dynamics with N = 500
+- [x] Phase 3 - High-resolution synthetic Burgers' dynamics with N = 500
 - [ ] Phase 4 - Allen-Cahn benchmark
 - [ ] Phase 5 - Navier-Stokes generalization
 - [ ] Phase 6 - Solver-agnostic extension to FNO / DeepONet
