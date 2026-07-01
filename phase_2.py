@@ -26,6 +26,10 @@ from sklearn.model_selection import KFold
 from xgboost import XGBRegressor
 from pathlib import Path
 import warnings
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import TensorDataset, DataLoader
 warnings.filterwarnings('ignore')
 
 np.random.seed(42)
@@ -92,217 +96,129 @@ X_features   = np.hstack([Phi_spatial, feat_eig, feat_ent, feat_energy])  # [Nx 
 final_pinn   = snapshots[-1]
 local_error  = np.mean(np.abs(final_pinn - U_exact), axis=1)  # [Nx]
 
-scaler = StandardScaler()
-X_sc   = scaler.fit_transform(X_features)
-
-print(f"✓ Feature matrix: {X_features.shape}")
-
 # ─────────────────────────────────────────────────────────────
-# 3A. PHASE 1 BASELINE — Ridge Regression (reproduce exactly)
+# 3. UNIFIED 5-FOLD OOF EVALUATION (Ridge, XGBoost, CNN)
 # ─────────────────────────────────────────────────────────────
-ridge      = Ridge(alpha=1.0)
-ridge.fit(X_sc, local_error)
-pred_ridge = np.clip(ridge.predict(X_sc), 0, None)
+print(f"\n── Unified 5-Fold OOF Evaluation ───────")
 
-mae_r  = mean_absolute_error(local_error, pred_ridge)
-r2_r   = r2_score(local_error, pred_ridge)
-corr_r = np.corrcoef(local_error, pred_ridge)[0, 1]
-
-print(f"\n── Phase 1  Ridge Regression ───────────")
-print(f"   MAE  = {mae_r:.5f}  |  R² = {r2_r:.4f}  |  Corr = {corr_r:.4f}")
-
-# ─────────────────────────────────────────────────────────────
-# 3B. PHASE 2A — XGBoost on tabular spectral features
-# ─────────────────────────────────────────────────────────────
-xgb = XGBRegressor(
-    n_estimators    = 400,
-    max_depth       = 5,
-    learning_rate   = 0.05,
-    subsample       = 0.8,
-    colsample_bytree= 0.8,
-    reg_alpha       = 0.1,
-    reg_lambda      = 1.0,
-    random_state    = 42,
-    verbosity       = 0
-)
-
-# 5-fold cross-val to get honest out-of-fold predictions
-kf           = KFold(n_splits=5, shuffle=True, random_state=42)
-pred_xgb_oof = np.zeros(Nx)
-
-for train_idx, val_idx in kf.split(X_sc):
-    xgb_fold = XGBRegressor(
-        n_estimators=400, max_depth=5, learning_rate=0.05,
-        subsample=0.8, colsample_bytree=0.8,
-        reg_alpha=0.1, reg_lambda=1.0,
-        random_state=42, verbosity=0
-    )
-    xgb_fold.fit(X_sc[train_idx], local_error[train_idx],
-                 eval_set=[(X_sc[val_idx], local_error[val_idx])],
-                 verbose=False)
-    pred_xgb_oof[val_idx] = np.clip(xgb_fold.predict(X_sc[val_idx]), 0, None)
-
-# Also fit on full data for final predictions used in plots
-xgb.fit(X_sc, local_error)
-pred_xgb_full = np.clip(xgb.predict(X_sc), 0, None)
-
-mae_x  = mean_absolute_error(local_error, pred_xgb_oof)
-r2_x   = r2_score(local_error, pred_xgb_oof)
-corr_x = np.corrcoef(local_error, pred_xgb_oof)[0, 1]
-
-print(f"\n── Phase 2A XGBoost (5-fold OOF) ───────")
-print(f"   MAE  = {mae_x:.5f}  |  R² = {r2_x:.4f}  |  Corr = {corr_x:.4f}")
-
-# Feature importances
-feat_names = (
-    [f"phi_{i}" for i in range(r)] +
-    [f"|lam_{i}|" for i in range(r)] +
-    ["H"] +
-    [f"E_{i}" for i in range(r)]
-)
-importances   = xgb.feature_importances_
-top_idx       = np.argsort(importances)[::-1][:10]
-top_feats     = [(feat_names[i], importances[i]) for i in top_idx]
-
-print(f"\n   Top-5 features by importance:")
-for fname, fimp in top_feats[:5]:
-    print(f"     {fname:12s}  {fimp:.4f}")
-
-# ─────────────────────────────────────────────────────────────
-# 3C. PHASE 2B — 1D CNN over spatial DMD mode fields
-#     Input:  Phi_spatial [Nx x r]  treated as Nx timesteps, r channels
-#     Output: scalar error per spatial point
-#     Implemented in pure NumPy (no PyTorch needed for 1D conv)
-# ─────────────────────────────────────────────────────────────
-class Conv1DNet:
-    """
-    Minimal 1D CNN in NumPy.
-    Architecture:
-      Conv1D(r -> 32, kernel=5) -> ReLU -> Conv1D(32->16, kernel=3) -> ReLU
-      -> GlobalAvgPool -> Dense(16->8) -> ReLU -> Dense(8->1)
-    Trained with Adam + MSE loss.
-    """
-    def __init__(self, in_ch=15, lr=0.001):
-        self.lr = lr
-        k1, k2 = 5, 3
-        # Xavier init
-        self.W1 = np.random.randn(k1, in_ch, 32) * np.sqrt(2.0/(k1*in_ch))
-        self.b1 = np.zeros(32)
-        self.W2 = np.random.randn(k2, 32, 16) * np.sqrt(2.0/(k2*32))
-        self.b2 = np.zeros(16)
-        self.W3 = np.random.randn(16, 8) * np.sqrt(2.0/16)
-        self.b3 = np.zeros(8)
-        self.W4 = np.random.randn(8, 1) * np.sqrt(2.0/8)
-        self.b4 = np.zeros(1)
-        # Adam state
-        self.m = {k: np.zeros_like(v) for k, v in self._params().items()}
-        self.v = {k: np.zeros_like(v) for k, v in self._params().items()}
-        self.t = 0
-
-    def _params(self):
-        return {'W1':self.W1,'b1':self.b1,'W2':self.W2,'b2':self.b2,
-                'W3':self.W3,'b3':self.b3,'W4':self.W4,'b4':self.b4}
-
-    def _conv1d(self, x, W, b):
-        """x: [N, C_in], W: [k, C_in, C_out] -> out: [N-k+1, C_out]"""
-        k, Cin, Cout = W.shape
-        N = x.shape[0]
-        out = np.zeros((N - k + 1, Cout))
-        for i in range(N - k + 1):
-            out[i] = x[i:i+k].reshape(-1) @ W.reshape(k*Cin, Cout) + b
-        return out
-
+class Conv1DNet(nn.Module):
+    def __init__(self, in_ch=15):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv1d(in_ch, 32, kernel_size=5),
+            nn.ReLU(),
+            nn.Conv1d(32, 16, kernel_size=3),
+            nn.ReLU()
+        )
+        self.fc = nn.Sequential(
+            nn.Linear(16, 8),
+            nn.ReLU(),
+            nn.Linear(8, 1)
+        )
     def forward(self, x):
-        """x: [Nx, r]"""
-        # Conv block 1
-        h1 = self._conv1d(x, self.W1, self.b1)         # [Nx-4, 32]
-        h1 = np.maximum(0, h1)                          # ReLU
-        # Conv block 2
-        h2 = self._conv1d(h1, self.W2, self.b2)        # [Nx-6, 16]
-        h2 = np.maximum(0, h2)                          # ReLU
-        # Global avg pool -> [16]
-        h3 = h2.mean(axis=0)
-        # Dense
-        h4 = np.maximum(0, h3 @ self.W3 + self.b3)    # [8]
-        out = h4 @ self.W4 + self.b4                   # [1]
-        return out[0], (x, h1, h2, h3, h4)
+        x = self.net(x)
+        x = x.mean(dim=-1) # Global avg pool
+        x = self.fc(x)
+        return x
 
-    def predict_all(self, X):
-        """X: [Nx, r] -> predictions [Nx]"""
-        preds = []
-        pad   = (self.W1.shape[0]-1) + (self.W2.shape[0]-1)  # total receptive field loss
-        half  = pad // 2
-        for i in range(X.shape[0]):
-            # Use a local window centred at point i
-            lo  = max(0, i - 10)
-            hi  = min(X.shape[0], i + 11)
-            win = X[lo:hi]
-            if win.shape[0] < self.W1.shape[0] + self.W2.shape[0]:
-                preds.append(0.0)
-                continue
-            pred, _ = self.forward(win)
-            preds.append(float(pred))
-        return np.clip(np.array(preds), 0, None)
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
+pred_ridge = np.zeros(Nx)
+pred_xgb_full = np.zeros(Nx)
+pred_cnn = np.zeros(Nx)
 
-    def _adam_update(self, grads):
-        self.t += 1
-        b1, b2, eps = 0.9, 0.999, 1e-8
-        params = self._params()
-        for k in params:
-            if k not in grads: continue
-            g = grads[k]
-            self.m[k] = b1 * self.m[k] + (1-b1) * g
-            self.v[k] = b2 * self.v[k] + (1-b2) * g**2
-            m_hat = self.m[k] / (1 - b1**self.t)
-            v_hat = self.v[k] / (1 - b2**self.t)
-            params[k] -= self.lr * m_hat / (np.sqrt(v_hat) + eps)
+# Pre-extract spatial windows for CNN (padded by 10 to get size 21)
+X_cnn_pad = np.pad(Phi_spatial, ((10, 10), (0, 0)), mode='edge')
+windows = np.array([X_cnn_pad[i:i+21].T for i in range(Nx)]) # [Nx, r, 21]
 
-    def train_epoch(self, X, y):
-        """Simple SGD over all points with numerical gradient approximation."""
-        losses = []
-        eps_g  = 1e-4
-        # Use a simplified training: fit a small window per point
-        for i in np.random.permutation(X.shape[0]):
-            lo  = max(0, i-10); hi = min(X.shape[0], i+11)
-            win = X[lo:hi]
-            if win.shape[0] < self.W1.shape[0] + self.W2.shape[0]:
-                continue
-            pred, cache = self.forward(win)
-            loss = (pred - y[i])**2
-            losses.append(loss)
-            # Backprop through dense layers (analytical)
-            d_out  = 2 * (pred - y[i])
-            d_h4   = d_out * self.W4.flatten()
-            d_W4   = np.outer(cache[4], [d_out])
-            d_b4   = np.array([d_out])
-            d_h4   = d_h4 * (cache[4] > 0)
-            d_W3   = np.outer(cache[3], d_h4)
-            d_b3   = d_h4
-            grads  = {'W3': d_W3, 'b3': d_b3, 'W4': d_W4, 'b4': d_b4}
-            self._adam_update(grads)
-        return np.mean(losses) if losses else 0.0
+for fold, (train_idx, val_idx) in enumerate(kf.split(X_features)):
+    # -- Data prep --
+    scaler = StandardScaler()
+    X_tr = scaler.fit_transform(X_features[train_idx])
+    X_va = scaler.transform(X_features[val_idx])
+    y_tr, y_va = local_error[train_idx], local_error[val_idx]
+    
+    # 1. Ridge
+    ridge = Ridge(alpha=1.0)
+    ridge.fit(X_tr, y_tr)
+    pred_ridge[val_idx] = np.clip(ridge.predict(X_va), 0, None)
+    
+    # 2. XGBoost
+    xgb = XGBRegressor(n_estimators=400, max_depth=5, learning_rate=0.05,
+                       subsample=0.8, colsample_bytree=0.8,
+                       reg_alpha=0.1, reg_lambda=1.0, random_state=42, verbosity=0)
+    xgb.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
+    pred_xgb_full[val_idx] = np.clip(xgb.predict(X_va), 0, None)
+    
+    # 3. CNN
+    train_mean = Phi_spatial[train_idx].mean(axis=0).reshape(1, -1, 1)
+    train_std = (Phi_spatial[train_idx].std(axis=0) + 1e-8).reshape(1, -1, 1)
+    
+    win_tr = (windows[train_idx] - train_mean) / train_std
+    win_va = (windows[val_idx] - train_mean) / train_std
+    
+    win_tr = torch.tensor(win_tr, dtype=torch.float32)
+    win_va = torch.tensor(win_va, dtype=torch.float32)
+    
+    y_max = y_tr.max() + 1e-8
+    yt_tr = torch.tensor(y_tr / y_max, dtype=torch.float32).unsqueeze(1)
+    
+    cnn = Conv1DNet(in_ch=r)
+    optimizer = optim.Adam(cnn.parameters(), lr=0.005)
+    loader = DataLoader(TensorDataset(win_tr, yt_tr), batch_size=32, shuffle=True)
+    
+    cnn.train()
+    for _ in range(60):
+        for bx, by in loader:
+            optimizer.zero_grad()
+            loss = nn.MSELoss()(cnn(bx), by)
+            loss.backward()
+            optimizer.step()
+            
+    cnn.eval()
+    with torch.no_grad():
+        pred_cnn[val_idx] = np.clip((cnn(win_va).squeeze(1).numpy() * y_max), 0, None)
 
-print(f"\n── Phase 2B  1D CNN ─────────────────────")
-cnn      = Conv1DNet(in_ch=r, lr=0.005)
-# Normalise input
-X_cnn    = (Phi_spatial - Phi_spatial.mean(0)) / (Phi_spatial.std(0) + 1e-8)
-y_norm   = local_error / (local_error.max() + 1e-8)
+def print_metrics(name, pred):
+    mae = mean_absolute_error(local_error, pred)
+    r2 = r2_score(local_error, pred)
+    corr = np.corrcoef(local_error, pred)[0, 1]
+    print(f"   {name:7s} | MAE={mae:.5f} | R²={r2:.4f} | Corr={corr:.4f}")
+    return mae, r2, corr
 
+mae_r, r2_r, corr_r = print_metrics("Ridge", pred_ridge)
+mae_x, r2_x, corr_x = print_metrics("XGBoost", pred_xgb_full)
+mae_c, r2_c, corr_c = print_metrics("CNN", pred_cnn)
+
+# ── Retrain on full dataset for plots ────────────────────────
+scaler = StandardScaler()
+X_sc = scaler.fit_transform(X_features)
+xgb.fit(X_sc, local_error)
+importances = xgb.feature_importances_
+top_idx = np.argsort(importances)[::-1][:10]
+feat_names = ([f"phi_{i}" for i in range(r)] + [f"|lam_{i}|" for i in range(r)] + ["H"] + [f"E_{i}" for i in range(r)])
+top_feats = [(feat_names[i], importances[i]) for i in top_idx]
+
+train_mean = Phi_spatial.mean(axis=0).reshape(1, -1, 1)
+train_std = (Phi_spatial.std(axis=0) + 1e-8).reshape(1, -1, 1)
+win_full = torch.tensor((windows - train_mean) / train_std, dtype=torch.float32)
+y_max = local_error.max() + 1e-8
+yt_full = torch.tensor(local_error / y_max, dtype=torch.float32).unsqueeze(1)
+loader = DataLoader(TensorDataset(win_full, yt_full), batch_size=32, shuffle=True)
+
+cnn = Conv1DNet(in_ch=r)
+optimizer = optim.Adam(cnn.parameters(), lr=0.005)
+cnn.train()
+losses = []
 n_epochs = 80
-losses   = []
-for ep in range(n_epochs):
-    l = cnn.train_epoch(X_cnn, y_norm)
-    losses.append(l)
-    if (ep+1) % 20 == 0:
-        print(f"   Epoch {ep+1:3d}/{n_epochs}  loss={l:.5f}")
-
-pred_cnn_norm = cnn.predict_all(X_cnn)
-pred_cnn      = pred_cnn_norm * local_error.max()
-
-mae_c  = mean_absolute_error(local_error, pred_cnn)
-r2_c   = r2_score(local_error, pred_cnn)
-corr_c = np.corrcoef(local_error, pred_cnn)[0, 1]
-print(f"   MAE  = {mae_c:.5f}  |  R² = {r2_c:.4f}  |  Corr = {corr_c:.4f}")
+for _ in range(n_epochs):
+    ep_loss = 0
+    for bx, by in loader:
+        optimizer.zero_grad()
+        loss = nn.MSELoss()(cnn(bx), by)
+        loss.backward()
+        optimizer.step()
+        ep_loss += loss.item() * bx.size(0)
+    losses.append(ep_loss / Nx)
 
 # ─────────────────────────────────────────────────────────────
 # 4. ADAPTIVE REFINEMENT — compare all three heads

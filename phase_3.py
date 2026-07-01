@@ -31,7 +31,14 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import KFold
 from xgboost import XGBRegressor
 from pathlib import Path
+from sklearn.model_selection import KFold
+from xgboost import XGBRegressor
+from pathlib import Path
 import warnings
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import TensorDataset, DataLoader
 warnings.filterwarnings('ignore')
 
 np.random.seed(42)
@@ -145,10 +152,10 @@ def run_dmd(snaps, r=20):
 
 r = 20
 Phi_real, eigvals_real, energies_real, H_real, sigma_real = run_dmd(snapshots_real, r=r)
-print(f"✓ DMD on real snapshots | H = {H_real:.4f}, rank={len(sigma_real)}")
+print(f"✓ DMD on synthetic snapshots | H = {H_real:.4f}, rank={len(sigma_real)}")
 
 # ─────────────────────────────────────────────────────────────
-# 6. FEATURE EXTRACTION (same as Phase 1/2)
+# 6. FEATURE EXTRACTION
 # ─────────────────────────────────────────────────────────────
 Phi_spatial_real = np.abs(Phi_real).reshape(Nx, Nt_pred, r).mean(axis=1)  # [Nx x r]
 feat_eig_real = np.tile(np.abs(eigvals_real[:r]), (Nx, 1))
@@ -157,154 +164,122 @@ feat_energy_real = np.tile(energies_real[:r], (Nx, 1))
 
 X_features_real = np.hstack([Phi_spatial_real, feat_eig_real, feat_ent_real, feat_energy_real])
 
-scaler_real = StandardScaler()
-X_sc_real = scaler_real.fit_transform(X_features_real)
-
-print(f"✓ Feature matrix | Shape: {X_features_real.shape}")
-
 # ─────────────────────────────────────────────────────────────
-# 7. REGRESSION HEADS ON REAL DATA
+# 7. UNIFIED 5-FOLD OOF EVALUATION (Ridge, XGBoost, CNN)
 # ─────────────────────────────────────────────────────────────
-print("\n── Ridge Regression ──────────────────────")
-ridge_real = Ridge(alpha=1.0)
-ridge_real.fit(X_sc_real, local_error_real)
-pred_ridge_real = np.clip(ridge_real.predict(X_sc_real), 0, None)
+print("\n── Unified 5-Fold OOF Evaluation ───────")
 
-mae_r_real = mean_absolute_error(local_error_real, pred_ridge_real)
-r2_r_real = r2_score(local_error_real, pred_ridge_real)
-corr_r_real = np.corrcoef(local_error_real, pred_ridge_real)[0, 1]
-print(f"   MAE  = {mae_r_real:.6f}  |  R² = {r2_r_real:.4f}  |  Corr = {corr_r_real:.4f}")
-
-print("── XGBoost (5-fold OOF) ──────────────────")
-kf = KFold(n_splits=5, shuffle=True, random_state=42)
-pred_xgb_real = np.zeros(Nx)
-
-for train_idx, val_idx in kf.split(X_sc_real):
-    xgb_fold = XGBRegressor(
-        n_estimators=300, max_depth=6, learning_rate=0.05,
-        subsample=0.8, colsample_bytree=0.8,
-        reg_alpha=0.1, reg_lambda=1.0,
-        random_state=42, verbosity=0
-    )
-    xgb_fold.fit(X_sc_real[train_idx], local_error_real[train_idx],
-                 eval_set=[(X_sc_real[val_idx], local_error_real[val_idx])],
-                 verbose=False)
-    pred_xgb_real[val_idx] = np.clip(xgb_fold.predict(X_sc_real[val_idx]), 0, None)
-
-mae_x_real = mean_absolute_error(local_error_real, pred_xgb_real)
-r2_x_real = r2_score(local_error_real, pred_xgb_real)
-corr_x_real = np.corrcoef(local_error_real, pred_xgb_real)[0, 1]
-print(f"   MAE  = {mae_x_real:.6f}  |  R² = {r2_x_real:.4f}  |  Corr = {corr_x_real:.4f}")
-
-# ─────────────────────────────────────────────────────────────
-# 8. 1D CNN HEAD (NumPy, same as Phase 2)
-# ─────────────────────────────────────────────────────────────
-class Conv1DNet:
-    """Minimal 1D CNN in NumPy."""
-    def __init__(self, in_ch=20, lr=0.001):
-        self.lr = lr
-        k1, k2 = 5, 3
-        self.W1 = np.random.randn(k1, in_ch, 32) * np.sqrt(2.0/(k1*in_ch))
-        self.b1 = np.zeros(32)
-        self.W2 = np.random.randn(k2, 32, 16) * np.sqrt(2.0/(k2*32))
-        self.b2 = np.zeros(16)
-        self.W3 = np.random.randn(16, 8) * np.sqrt(2.0/16)
-        self.b3 = np.zeros(8)
-        self.W4 = np.random.randn(8, 1) * np.sqrt(2.0/8)
-        self.b4 = np.zeros(1)
-        self.m = {k: np.zeros_like(v) for k, v in self._params().items()}
-        self.v = {k: np.zeros_like(v) for k, v in self._params().items()}
-        self.t = 0
-
-    def _params(self):
-        return {'W1':self.W1,'b1':self.b1,'W2':self.W2,'b2':self.b2,
-                'W3':self.W3,'b3':self.b3,'W4':self.W4,'b4':self.b4}
-
-    def _conv1d(self, x, W, b):
-        k, Cin, Cout = W.shape
-        N = x.shape[0]
-        out = np.zeros((N - k + 1, Cout))
-        for i in range(N - k + 1):
-            out[i] = x[i:i+k].reshape(-1) @ W.reshape(k*Cin, Cout) + b
-        return out
-
+class Conv1DNet(nn.Module):
+    def __init__(self, in_ch=20):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv1d(in_ch, 32, kernel_size=5),
+            nn.ReLU(),
+            nn.Conv1d(32, 16, kernel_size=3),
+            nn.ReLU()
+        )
+        self.fc = nn.Sequential(
+            nn.Linear(16, 8),
+            nn.ReLU(),
+            nn.Linear(8, 1)
+        )
     def forward(self, x):
-        h1 = self._conv1d(x, self.W1, self.b1)
-        h1 = np.maximum(0, h1)
-        h2 = self._conv1d(h1, self.W2, self.b2)
-        h2 = np.maximum(0, h2)
-        h3 = h2.mean(axis=0)
-        h4 = np.maximum(0, h3 @ self.W3 + self.b3)
-        out = h4 @ self.W4 + self.b4
-        return out[0], (x, h1, h2, h3, h4)
+        x = self.net(x)
+        x = x.mean(dim=-1)
+        x = self.fc(x)
+        return x
 
-    def predict_all(self, X):
-        preds = []
-        pad = (self.W1.shape[0]-1) + (self.W2.shape[0]-1)
-        for i in range(X.shape[0]):
-            lo = max(0, i - 10)
-            hi = min(X.shape[0], i + 11)
-            win = X[lo:hi]
-            if win.shape[0] < self.W1.shape[0] + self.W2.shape[0]:
-                preds.append(0.0)
-            else:
-                pred, _ = self.forward(win)
-                preds.append(float(pred))
-        return np.clip(np.array(preds), 0, None)
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
+pred_ridge_real = np.zeros(Nx)
+pred_xgb_real = np.zeros(Nx)
+pred_cnn_real = np.zeros(Nx)
 
-    def _adam_update(self, grads):
-        self.t += 1
-        b1, b2, eps = 0.9, 0.999, 1e-8
-        params = self._params()
-        for k in params:
-            if k not in grads: continue
-            g = grads[k]
-            self.m[k] = b1 * self.m[k] + (1-b1) * g
-            self.v[k] = b2 * self.v[k] + (1-b2) * g**2
-            m_hat = self.m[k] / (1 - b1**self.t)
-            v_hat = self.v[k] / (1 - b2**self.t)
-            params[k] -= self.lr * m_hat / (np.sqrt(v_hat) + eps)
+# Pre-extract spatial windows for CNN (padded by 10 to get size 21)
+X_cnn_pad = np.pad(Phi_spatial_real, ((10, 10), (0, 0)), mode='edge')
+windows = np.array([X_cnn_pad[i:i+21].T for i in range(Nx)]) # [Nx, r, 21]
 
-    def train_epoch(self, X, y):
-        losses = []
-        for i in np.random.permutation(X.shape[0]):
-            lo = max(0, i-10); hi = min(X.shape[0], i+11)
-            win = X[lo:hi]
-            if win.shape[0] < self.W1.shape[0] + self.W2.shape[0]:
-                continue
-            pred, cache = self.forward(win)
-            loss = (pred - y[i])**2
-            losses.append(loss)
-            d_out = 2 * (pred - y[i])
-            d_h4 = d_out * self.W4.flatten()
-            d_W4 = np.outer(cache[4], [d_out])
-            d_b4 = np.array([d_out])
-            d_h4 = d_h4 * (cache[4] > 0)
-            d_W3 = np.outer(cache[3], d_h4)
-            d_b3 = d_h4
-            grads = {'W3': d_W3, 'b3': d_b3, 'W4': d_W4, 'b4': d_b4}
-            self._adam_update(grads)
-        return np.mean(losses) if losses else 0.0
+for fold, (train_idx, val_idx) in enumerate(kf.split(X_features_real)):
+    scaler = StandardScaler()
+    X_tr = scaler.fit_transform(X_features_real[train_idx])
+    X_va = scaler.transform(X_features_real[val_idx])
+    y_tr, y_va = local_error_real[train_idx], local_error_real[val_idx]
+    
+    # 1. Ridge
+    ridge = Ridge(alpha=1.0)
+    ridge.fit(X_tr, y_tr)
+    pred_ridge_real[val_idx] = np.clip(ridge.predict(X_va), 0, None)
+    
+    # 2. XGBoost
+    xgb = XGBRegressor(n_estimators=300, max_depth=6, learning_rate=0.05,
+                       subsample=0.8, colsample_bytree=0.8,
+                       reg_alpha=0.1, reg_lambda=1.0, random_state=42, verbosity=0)
+    xgb.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
+    pred_xgb_real[val_idx] = np.clip(xgb.predict(X_va), 0, None)
+    
+    # 3. CNN
+    train_mean = Phi_spatial_real[train_idx].mean(axis=0).reshape(1, -1, 1)
+    train_std = (Phi_spatial_real[train_idx].std(axis=0) + 1e-8).reshape(1, -1, 1)
+    
+    win_tr = (windows[train_idx] - train_mean) / train_std
+    win_va = (windows[val_idx] - train_mean) / train_std
+    
+    win_tr = torch.tensor(win_tr, dtype=torch.float32)
+    win_va = torch.tensor(win_va, dtype=torch.float32)
+    
+    y_max = y_tr.max() + 1e-8
+    yt_tr = torch.tensor(y_tr / y_max, dtype=torch.float32).unsqueeze(1)
+    
+    cnn = Conv1DNet(in_ch=r)
+    optimizer = optim.Adam(cnn.parameters(), lr=0.005)
+    loader = DataLoader(TensorDataset(win_tr, yt_tr), batch_size=32, shuffle=True)
+    
+    cnn.train()
+    for _ in range(60):
+        for bx, by in loader:
+            optimizer.zero_grad()
+            loss = nn.MSELoss()(cnn(bx), by)
+            loss.backward()
+            optimizer.step()
+            
+    cnn.eval()
+    with torch.no_grad():
+        pred_cnn_real[val_idx] = np.clip((cnn(win_va).squeeze(1).numpy() * y_max), 0, None)
 
-print("── 1D CNN ────────────────────────────────")
-cnn_real = Conv1DNet(in_ch=r, lr=0.005)
-X_cnn_real = (Phi_spatial_real - Phi_spatial_real.mean(0)) / (Phi_spatial_real.std(0) + 1e-8)
-y_norm_real = local_error_real / (local_error_real.max() + 1e-8)
+def print_metrics(name, pred):
+    mae = mean_absolute_error(local_error_real, pred)
+    r2 = r2_score(local_error_real, pred)
+    corr = np.corrcoef(local_error_real, pred)[0, 1]
+    print(f"   {name:7s} | MAE={mae:.6f} | R²={r2:.4f} | Corr={corr:.4f}")
+    return mae, r2, corr
 
+mae_r_real, r2_r_real, corr_r_real = print_metrics("Ridge", pred_ridge_real)
+mae_x_real, r2_x_real, corr_x_real = print_metrics("XGBoost", pred_xgb_real)
+mae_c_real, r2_c_real, corr_c_real = print_metrics("CNN", pred_cnn_real)
+
+# ── Retrain on full dataset for plots ────────────────────────
+scaler = StandardScaler()
+X_sc_real = scaler.fit_transform(X_features_real)
+
+train_mean = Phi_spatial_real.mean(axis=0).reshape(1, -1, 1)
+train_std = (Phi_spatial_real.std(axis=0) + 1e-8).reshape(1, -1, 1)
+win_full = torch.tensor((windows - train_mean) / train_std, dtype=torch.float32)
+y_max = local_error_real.max() + 1e-8
+yt_full = torch.tensor(local_error_real / y_max, dtype=torch.float32).unsqueeze(1)
+loader = DataLoader(TensorDataset(win_full, yt_full), batch_size=32, shuffle=True)
+
+cnn = Conv1DNet(in_ch=r)
+optimizer = optim.Adam(cnn.parameters(), lr=0.005)
+cnn.train()
 losses_cnn = []
-for ep in range(80):
-    l = cnn_real.train_epoch(X_cnn_real, y_norm_real)
-    losses_cnn.append(l)
-    if (ep+1) % 20 == 0:
-        print(f"   Epoch {ep+1:3d}/80  loss={l:.5f}")
-
-pred_cnn_norm_real = cnn_real.predict_all(X_cnn_real)
-pred_cnn_real = pred_cnn_norm_real * local_error_real.max()
-
-mae_c_real = mean_absolute_error(local_error_real, pred_cnn_real)
-r2_c_real = r2_score(local_error_real, pred_cnn_real)
-corr_c_real = np.corrcoef(local_error_real, pred_cnn_real)[0, 1]
-print(f"   MAE  = {mae_c_real:.6f}  |  R² = {r2_c_real:.4f}  |  Corr = {corr_c_real:.4f}")
+for _ in range(80):
+    ep_loss = 0
+    for bx, by in loader:
+        optimizer.zero_grad()
+        loss = nn.MSELoss()(cnn(bx), by)
+        loss.backward()
+        optimizer.step()
+        ep_loss += loss.item() * bx.size(0)
+    losses_cnn.append(ep_loss / Nx)
 
 # ─────────────────────────────────────────────────────────────
 # 9. ADAPTIVE REFINEMENT
@@ -387,7 +362,7 @@ ax.set_ylabel('R²', color=TXT, fontsize=8)
 for bar, val in zip(bars, r2_vals):
     ax.text(bar.get_x() + bar.get_width()/2, val + 0.01,
             f'{val:.3f}', ha='center', va='bottom', color=TXT, fontsize=9, fontweight='bold')
-style_ax(ax, 'R² Comparison — Real PINN Data (N=500)')
+style_ax(ax, 'R² Comparison — High-Resolution Synthetic PINN Data (N=500)')
 
 # Panel 1,1 — MAE Comparison
 ax = fig.add_subplot(gs[1, 1])
@@ -397,7 +372,7 @@ ax.set_ylabel('MAE', color=TXT, fontsize=8)
 for bar, val in zip(bars, mae_vals):
     ax.text(bar.get_x() + bar.get_width()/2, val + 0.00001,
             f'{val:.5f}', ha='center', va='bottom', color=TXT, fontsize=8, fontweight='bold')
-style_ax(ax, 'MAE Comparison — Real PINN Data (N=500)')
+style_ax(ax, 'MAE Comparison — High-Resolution Synthetic PINN Data (N=500)')
 
 # Panel 1,2 — Correlation Comparison
 ax = fig.add_subplot(gs[1, 2])
@@ -408,7 +383,7 @@ ax.set_ylim(0, 1.0)
 for bar, val in zip(bars, corr_vals):
     ax.text(bar.get_x() + bar.get_width()/2, val + 0.02,
             f'{val:.3f}', ha='center', va='bottom', color=TXT, fontsize=9, fontweight='bold')
-style_ax(ax, 'Correlation Comparison — Real PINN Data')
+style_ax(ax, 'Correlation Comparison — High-Resolution Synthetic PINN Data')
 
 # ── Row 2: True vs Predicted ─────────────────────────────────
 for col_i, (pred, label, color, mae_v, r2_v) in enumerate([
@@ -476,7 +451,7 @@ style_ax(ax, 'Cross-Phase Improvement', ORANGE)
 
 fig.suptitle(
     "Spectral Error Indicators for Neural PDE Solvers — Phase 3 Results\n"
-    "Real PyTorch PINN with Higher Resolution (N=500) vs Synthetic Phase 1/2  |  Aditya Alur, PES EC",
+    "High-Resolution Synthetic PINN with Higher Resolution (N=500) vs Synthetic Phase 1/2  |  Aditya Alur, PES EC",
     color=TXT, fontsize=11, fontweight='bold', y=0.99
 )
 
@@ -489,7 +464,7 @@ print("\n✓ Phase 3 results figure saved → outputs/phase3_results.png")
 # 11. FINAL SUMMARY TABLE
 # ─────────────────────────────────────────────────────────────
 print("\n" + "="*80)
-print("PHASE 3 FINAL SUMMARY — Real PyTorch PINN (N=500, Real Snapshots)")
+print("PHASE 3 FINAL SUMMARY — High-Resolution Synthetic PINN (N=500, Real Snapshots)")
 print("="*80)
 print(f"{'Model':<20} {'MAE':>12} {'R²':>10} {'Corr':>10} {'Refinement':>12}")
 print("-"*80)
@@ -499,18 +474,18 @@ print(f"{'CNN':<20} {mae_c_real:>12.6f} {r2_c_real:>10.4f} {corr_c_real:>10.4f} 
 print("="*80)
 
 print("\n" + "="*80)
-print("CROSS-PHASE COMPARISON: Synthetic (Phase 1/2) vs Real PINN (Phase 3)")
+print("CROSS-PHASE COMPARISON: Synthetic (Phase 1/2) vs High-Resolution Synthetic PINN (Phase 3)")
 print("="*80)
 print(f"{'Phase':<25} {'N':>6} {'Data Type':<12} {'Ridge Corr':>12} {'CNN Corr':>12}")
 print("-"*80)
 print(f"{'Phase 1 (Ridge)':<25} {100:>6} {'Synthetic':<12} {0.287:>12.4f} {'N/A':>12}")
 print(f"{'Phase 2 (XGBoost+CNN)':<25} {100:>6} {'Synthetic':<12} {0.287:>12.4f} {0.359:>12.4f}")
-print(f"{'Phase 3 (Real PINN)':<25} {500:>6} {'Real':<12} {corr_r_real:>12.4f} {corr_c_real:>12.4f}")
+print(f"{'Phase 3 (High-Resolution Synthetic PINN)':<25} {500:>6} {'Real':<12} {corr_r_real:>12.4f} {corr_c_real:>12.4f}")
 print("="*80)
 
 print("\n📊 Key Insights:")
 print(f"  ✓ N=500 (5× resolution) enabled better feature richness for regression")
-print(f"  ✓ Real PINN dynamics differ from synthetic → CNN correlation now: {corr_c_real:.4f}")
+print(f"  ✓ High-Resolution Synthetic PINN dynamics differ from synthetic → CNN correlation now: {corr_c_real:.4f}")
 print(f"  ✓ High-resolution grid confirmed bottleneck hypothesis from Phase 2")
 print(f"  ✓ Solver-agnostic framework validated on real neural network training")
 print(f"  ✓ Phase 3 demonstrates feasibility for production PINN solvers")

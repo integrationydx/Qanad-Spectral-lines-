@@ -136,7 +136,7 @@ Quanad/
 ```bash
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install numpy scipy matplotlib scikit-learn xgboost
+pip install numpy scipy matplotlib scikit-learn xgboost torch
 ```
 
 On macOS, if xgboost reports a missing OpenMP runtime, install:
